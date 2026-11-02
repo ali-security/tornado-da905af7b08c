@@ -9,6 +9,10 @@ from tornado.httputil import (
     qs_to_qsl,
     HTTPInputError,
     HTTPFile,
+    ParseMultipartConfig,
+    ParseBodyConfig,
+    parse_body_arguments,
+    set_parse_body_config,
 )
 from tornado.escape import utf8, native_str
 from tornado.log import gen_log
@@ -258,6 +262,135 @@ Foo
         file = files["files"][0]
         self.assertEqual(file["filename"], "ab.txt")
         self.assertEqual(file["body"], b"Foo")
+
+    def test_multipart_config(self):
+        boundary = b"1234"
+        body = b"""--1234
+Content-Disposition: form-data; name="files"; filename="ab.txt"
+
+--1234--""".replace(
+            b"\n", b"\r\n"
+        )
+        config = ParseMultipartConfig()
+        args, files = form_data_args()
+        parse_multipart_form_data(boundary, body, args, files, config=config)
+        self.assertEqual(files["files"][0]["filename"], "ab.txt")
+
+        config_no_parts = ParseMultipartConfig(max_parts=0)
+        with self.assertRaises(HTTPInputError) as cm:
+            parse_multipart_form_data(
+                boundary, body, args, files, config=config_no_parts
+            )
+        self.assertIn("too many parts", str(cm.exception))
+
+        config_small_headers = ParseMultipartConfig(max_part_header_size=10)
+        with self.assertRaises(HTTPInputError) as cm:
+            parse_multipart_form_data(
+                boundary, body, args, files, config=config_small_headers
+            )
+        self.assertIn("header too large", str(cm.exception))
+
+        config_disabled = ParseMultipartConfig(enabled=False)
+        with self.assertRaises(HTTPInputError) as cm:
+            parse_multipart_form_data(
+                boundary, body, args, files, config=config_disabled
+            )
+        self.assertIn("multipart/form-data parsing is disabled", str(cm.exception))
+
+    def test_multipart_limits_parse_body_arguments(self):
+        # parse_body_arguments (used by HTTPServerRequest._parse_body) must
+        # stop parsing multipart bodies that exceed the configured limits;
+        # like other malformed bodies they are logged and ignored.
+        def make_body(num_parts: int, pad: int = 0) -> bytes:
+            chunks = []
+            for i in range(num_parts):
+                chunks.append(b"--1234\r\n")
+                chunks.append(b'Content-Disposition: form-data; name="f%d"\r\n' % i)
+                if pad:
+                    chunks.append(b"X-Padding: " + b"a" * pad + b"\r\n")
+                chunks.append(b"\r\nv\r\n")
+            chunks.append(b"--1234--\r\n")
+            return b"".join(chunks)
+
+        content_type = "multipart/form-data; boundary=1234"
+
+        # 99 parts (plus the empty leading segment) fit the default limit.
+        args, files = form_data_args()
+        parse_body_arguments(content_type, make_body(99), args, files)
+        self.assertEqual(len(args), 99)
+
+        # One more part exceeds the default limit of 100.
+        args, files = form_data_args()
+        with ExpectLog(gen_log, ".*multipart/form-data has too many parts"):
+            parse_body_arguments(content_type, make_body(100), args, files)
+        self.assertEqual(args, {})
+
+        # A body with a huge number of parts is rejected without parsing.
+        args, files = form_data_args()
+        with ExpectLog(gen_log, ".*multipart/form-data has too many parts"):
+            parse_body_arguments(content_type, make_body(10000), args, files)
+        self.assertEqual(args, {})
+
+        # Part headers within the default size limit are accepted.
+        args, files = form_data_args()
+        parse_body_arguments(content_type, make_body(1, pad=8 * 1024), args, files)
+        self.assertEqual(args, {"f0": [b"v"]})
+
+        # Oversized part headers are rejected.
+        args, files = form_data_args()
+        with ExpectLog(gen_log, ".*multipart/form-data part header too large"):
+            parse_body_arguments(
+                content_type, make_body(1, pad=1024 * 1024), args, files
+            )
+        self.assertEqual(args, {})
+
+        # Per-call configuration.
+        args, files = form_data_args()
+        config = ParseBodyConfig(multipart=ParseMultipartConfig(max_parts=5))
+        with ExpectLog(gen_log, ".*multipart/form-data has too many parts"):
+            parse_body_arguments(
+                content_type, make_body(5), args, files, config=config
+            )
+        self.assertEqual(args, {})
+
+        args, files = form_data_args()
+        config = ParseBodyConfig(multipart=ParseMultipartConfig(enabled=False))
+        with ExpectLog(gen_log, ".*multipart/form-data parsing is disabled"):
+            parse_body_arguments(
+                content_type, make_body(1), args, files, config=config
+            )
+        self.assertEqual(args, {})
+
+        # Global configuration.
+        set_parse_body_config(
+            ParseBodyConfig(multipart=ParseMultipartConfig(max_parts=1000))
+        )
+        try:
+            args, files = form_data_args()
+            parse_body_arguments(content_type, make_body(500), args, files)
+            self.assertEqual(len(args), 500)
+        finally:
+            set_parse_body_config(ParseBodyConfig())
+
+        set_parse_body_config(
+            ParseBodyConfig(multipart=ParseMultipartConfig(enabled=False))
+        )
+        try:
+            args, files = form_data_args()
+            with ExpectLog(gen_log, ".*multipart/form-data parsing is disabled"):
+                parse_body_arguments(content_type, make_body(1), args, files)
+            self.assertEqual(args, {})
+        finally:
+            set_parse_body_config(ParseBodyConfig())
+
+        # Content types that merely start with "multipart/form-data" are
+        # not parsed as multipart.
+        args, files = form_data_args()
+        with ExpectLog(gen_log, ".*Invalid content type"):
+            parse_body_arguments(
+                "multipart/form-dataxyz; boundary=1234", make_body(1), args, files
+            )
+        self.assertEqual(args, {})
 
 
 class HTTPHeadersTest(unittest.TestCase):

@@ -788,6 +788,13 @@ class MaskFunctionMixin(object):
             b"\xff\xfa\xff\xff\xfb\xfe",
         )
 
+    def test_length_validation(self: typing.Any):
+        # Test all lengths of mask that are not 4 bytes.
+        for mask in (b"", b"a", b"ab", b"abc", b"abcde", b"abcdef"):
+            with self.subTest(mask=mask):
+                with self.assertRaises(ValueError):
+                    self.mask(mask, b"data asdf")
+
 
 class PythonMaskFunctionTest(MaskFunctionMixin, unittest.TestCase):
     def mask(self, mask, data):

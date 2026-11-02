@@ -3001,6 +3001,18 @@ class XSRFTest(SimpleHandlerTestCase):
             )
         self.assertEqual(response.code, 403)
 
+    def test_xsrf_cookie_invalid_mask_length(self):
+        # A v2 cookie whose mask is not exactly 4 bytes must be rejected
+        # (and a fresh token issued) instead of being unmasked, which would
+        # read past the end of the mask in the native websocket_mask.
+        for mask in ("", "61", "6162", "616263", "6162636465"):
+            with self.subTest(mask=mask):
+                response = self.fetch(
+                    "/", headers=self.cookie_headers(token="2|%s|de|1234567890" % mask)
+                )
+                response.rethrow()
+                self.assertIn("_xsrf=", response.headers.get("Set-Cookie", ""))
+
     def test_xsrf_fail_cookie_no_body(self):
         with ExpectLog(gen_log, ".*'_xsrf' argument missing"):
             response = self.fetch(

@@ -709,6 +709,38 @@ class MalformedBodyTest(WebTestCase):
         self.assertEqual(expect_log.matched, 1)
         self.assertFalse(self.prepare_called)
 
+    def test_urlencoded_too_many_arguments(self):
+        # Form-encoded bodies are limited to 1000 arguments by default.
+        body = "&".join("a%d=1" % i for i in range(1000))
+        response = self.fetch("/", method="POST", body=body)
+        self.assertEqual(response.code, 200)
+        self.assertEqual(len(json_decode(response.body)["args"]), 1000)
+        self.assertTrue(self.prepare_called)
+
+        self.prepare_called = False
+        body = "&".join("a%d=1" % i for i in range(1001))
+        with ExpectLog(gen_log, ".*Max number of fields exceeded") as expect_log:
+            response = self.fetch("/", method="POST", body=body)
+        self.assertEqual(response.code, 400)
+        self.assertEqual(expect_log.matched, 1)
+        self.assertFalse(self.prepare_called)
+
+    def test_multipart_too_many_parts(self):
+        body = (
+            b'--1234\r\nContent-Disposition: form-data; name="a"\r\n\r\nv\r\n' * 10000
+            + b"--1234--\r\n"
+        )
+        with ExpectLog(gen_log, ".*too many parts") as expect_log:
+            response = self.fetch(
+                "/",
+                method="POST",
+                body=body,
+                headers={"Content-Type": "multipart/form-data; boundary=1234"},
+            )
+        self.assertEqual(response.code, 400)
+        self.assertEqual(expect_log.matched, 1)
+        self.assertFalse(self.prepare_called)
+
     def test_unsupported_content_encoding(self):
         with ExpectLog(gen_log, ".*Unsupported Content-Encoding") as expect_log:
             response = self.fetch(

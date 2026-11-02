@@ -12,6 +12,7 @@ from tornado.escape import (
     json_encode,
     squeeze,
     recursive_unicode,
+    parse_qs_bytes,
 )
 from tornado.util import unicode_type
 
@@ -322,3 +323,13 @@ class EscapeTestCase(unittest.TestCase):
         self.assertEqual(recursive_unicode(tests["list"]), ["foo", "bar"])
         self.assertEqual(recursive_unicode(tests["tuple"]), ("foo", "bar"))
         self.assertEqual(recursive_unicode(tests["bytes"]), "foo")
+
+    def test_parse_qs_bytes_max_num_fields(self):
+        qs = b"&".join(b"a=%d" % i for i in range(1001))
+        # No limit by default.
+        self.assertEqual(len(parse_qs_bytes(qs)["a"]), 1001)
+        # The limit is inclusive.
+        self.assertEqual(len(parse_qs_bytes(qs, max_num_fields=1001)["a"]), 1001)
+        with self.assertRaises(ValueError) as cm:
+            parse_qs_bytes(qs, max_num_fields=1000)
+        self.assertIn("Max number of fields exceeded", str(cm.exception))

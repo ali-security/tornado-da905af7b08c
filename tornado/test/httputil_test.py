@@ -503,6 +503,9 @@ Foo: even
             sorted(list(headers.get_all())),
             [("Asdf", "qwer zxcv"), ("Foo", "bar baz"), ("Foo", "even more lines")],
         )
+        # Verify case insensitivity in-operator
+        self.assertTrue("asdf" in headers)
+        self.assertTrue("Asdf" in headers)
 
     def test_malformed_continuation(self):
         # If the first line starts with whitespace, it's a
@@ -625,6 +628,69 @@ Foo: even
         headers.add("Foo", "3")
         headers2 = HTTPHeaders.parse(str(headers))
         self.assertEqual(headers, headers2)
+
+    def test_combined_value_cache(self):
+        # The combined (comma-joined) value is computed lazily and cached;
+        # make sure every mutation invalidates it.
+        headers = HTTPHeaders()
+        headers["Foo"] = "a"
+        self.assertEqual(headers["foo"], "a")
+        headers.add("foo", "b")
+        self.assertEqual(headers["Foo"], "a,b")
+        headers.parse_line(" c")
+        self.assertEqual(headers["FOO"], "a,b c")
+        self.assertEqual(headers.get_list("foo"), ["a", "b c"])
+        self.assertEqual(len(headers), 1)
+        self.assertEqual(list(headers), ["Foo"])
+        # Deleting a header whose combined value is not cached must work.
+        headers.add("Foo", "d")
+        del headers["foo"]
+        self.assertNotIn("Foo", headers)
+        self.assertEqual(len(headers), 0)
+        with self.assertRaises(KeyError):
+            headers["Foo"]
+        with self.assertRaises(KeyError):
+            del headers["Foo"]
+        headers["Foo"] = "e"
+        self.assertEqual(headers["Foo"], "e")
+        self.assertEqual(headers.get_list("Foo"), ["e"])
+        # Non-string keys are never present.
+        self.assertFalse(1 in headers)
+
+    def test_linear_performance(self):
+        # Use perf_counter rather than time.time, whose coarse resolution on
+        # windows can make the small run measure as zero.
+        def f(n):
+            start = time.perf_counter()
+            headers = HTTPHeaders()
+            for i in range(n):
+                headers.add("X-Foo", "bar")
+            return time.perf_counter() - start
+
+        # This runs under 50ms on my laptop as of 2025-12-09.
+        # Take the best of several runs at each size to reduce noise.
+        d1 = min(f(10_000) for _ in range(3))
+        d2 = min(f(100_000) for _ in range(3))
+        if d2 / d1 > 20:
+            # d2 should be about 10x d1 but allow a wide margin for variability.
+            self.fail(f"HTTPHeaders.add() does not scale linearly: {d1=} vs {d2=}")
+
+    def test_linear_performance_parse(self):
+        # A single request repeating the same header many times must not
+        # take quadratic time to parse.
+        def f(n):
+            data = "X-Foo: bar\r\n" * n
+            start = time.perf_counter()
+            headers = HTTPHeaders.parse(data)
+            elapsed = time.perf_counter() - start
+            self.assertEqual(len(headers.get_list("X-Foo")), n)
+            return elapsed
+
+        d1 = min(f(10_000) for _ in range(3))
+        d2 = min(f(100_000) for _ in range(3))
+        if d2 / d1 > 20:
+            # d2 should be about 10x d1 but allow a wide margin for variability.
+            self.fail(f"HTTPHeaders.parse() does not scale linearly: {d1=} vs {d2=}")
 
 
 class FormatTimestampTest(unittest.TestCase):

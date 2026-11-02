@@ -1,6 +1,7 @@
 import collections
 from contextlib import closing
 import errno
+import gzip
 import logging
 import os
 import re
@@ -770,7 +771,15 @@ class MaxBodySizeTest(AsyncHTTPTestCase):
             def get(self):
                 self.write("a" * 1024 * 100)
 
-        return Application([("/small", SmallBody), ("/large", LargeBody)])
+        class GzipBody(RequestHandler):
+            def get(self):
+                # Small on the wire, but decompresses to the given size.
+                self.set_header("Content-Encoding", "gzip")
+                self.write(gzip.compress(b"a" * int(self.get_argument("size"))))
+
+        return Application(
+            [("/small", SmallBody), ("/large", LargeBody), ("/gzip", GzipBody)]
+        )
 
     def get_http_client(self):
         return SimpleAsyncHTTPClient(max_body_size=1024 * 64)
@@ -788,6 +797,22 @@ class MaxBodySizeTest(AsyncHTTPTestCase):
         ):
             with self.assertRaises(HTTPStreamClosedError):
                 self.fetch("/large", raise_error=True)
+
+    def test_small_gzip_body(self):
+        response = self.fetch("/gzip?size=%d" % (1024 * 64))
+        response.rethrow()
+        self.assertEqual(response.body, b"a" * 1024 * 64)
+
+    def test_large_gzip_body(self):
+        # The compressed body is well under max_body_size, but the
+        # decompressed body is not (gzip bomb).
+        with ExpectLog(
+            gen_log,
+            "Malformed HTTP message from None: decompressed body too large",
+            level=logging.INFO,
+        ):
+            with self.assertRaises(HTTPStreamClosedError):
+                self.fetch("/gzip?size=%d" % (1024 * 1024 * 10), raise_error=True)
 
 
 class MaxBufferSizeTest(AsyncHTTPTestCase):

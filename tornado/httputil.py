@@ -66,6 +66,25 @@ if typing.TYPE_CHECKING:
 HTTP_WHITESPACE = " \t"
 
 
+class _ABNF:
+    """Class that holds a subset of ABNF rules from RFC 9110 and friends.
+
+    Class attributes are re.Pattern objects, with the same name as in the RFC
+    (with hyphens changed to underscores). Currently contains only the subset
+    we use (which is why this class is not public). Unfortunately the fields
+    cannot be alphabetized as they are in the RFCs because of dependencies.
+    """
+
+    # RFC 5234 (ABNF)
+    VCHAR = re.compile(r"[\x21-\x7E]")
+
+    # RFC 9110 (HTTP Semantics)
+    obs_text = re.compile(r"[\x80-\xFF]")
+
+    # RFC 9112 (HTTP/1.1)
+    reason_phrase = re.compile(rf"(?:[\t ]|{VCHAR.pattern}|{obs_text.pattern})+")
+
+
 @lru_cache(1000)
 def _normalize_header(name: str) -> str:
     """Map a header name to Http-Header-Case.

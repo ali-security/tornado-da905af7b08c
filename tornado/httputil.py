@@ -35,7 +35,6 @@ import unicodedata
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 from tornado.escape import native_str, parse_qs_bytes, utf8
-from tornado.log import gen_log
 from tornado.util import ObjectDict, unicode_type
 
 
@@ -805,8 +804,8 @@ def set_parse_body_config(config: ParseBodyConfig) -> None:
     release.
 
     When a limit is exceeded (or multipart parsing is disabled), `.parse_multipart_form_data`
-    raises `.HTTPInputError`. `.parse_body_arguments` handles this like any other malformed
-    ``multipart/form-data`` body: it logs a warning and ignores the body.
+    and `.parse_body_arguments` raise `.HTTPInputError`, which `.RequestHandler` turns into
+    a ``400 Bad Request`` response.
 
     >>> boundary = b"foo"
     >>> multipart_body = b"--foo--\r\n"
@@ -847,25 +846,22 @@ def parse_body_arguments(
         config = _DEFAULT_PARSE_BODY_CONFIG
     if content_type.startswith("application/x-www-form-urlencoded"):
         if headers and "Content-Encoding" in headers:
-            gen_log.warning(
-                "Unsupported Content-Encoding: %s", headers["Content-Encoding"]
+            raise HTTPInputError(
+                "Unsupported Content-Encoding: %s" % headers["Content-Encoding"]
             )
-            return
         try:
             # real charset decoding will happen in RequestHandler.decode_argument()
             uri_arguments = parse_qs_bytes(body, keep_blank_values=True)
         except Exception as e:
-            gen_log.warning("Invalid x-www-form-urlencoded body: %s", e)
-            uri_arguments = {}
+            raise HTTPInputError("Invalid x-www-form-urlencoded body: %s" % e) from e
         for name, values in uri_arguments.items():
             if values:
                 arguments.setdefault(name, []).extend(values)
     elif content_type.startswith("multipart/form-data"):
         if headers and "Content-Encoding" in headers:
-            gen_log.warning(
-                "Unsupported Content-Encoding: %s", headers["Content-Encoding"]
+            raise HTTPInputError(
+                "Unsupported Content-Encoding: %s" % headers["Content-Encoding"]
             )
-            return
         try:
             fields = content_type.split(";")
             if fields[0].strip() != "multipart/form-data":
@@ -879,9 +875,9 @@ def parse_body_arguments(
                     )
                     break
             else:
-                raise ValueError("multipart boundary not found")
+                raise HTTPInputError("multipart boundary not found")
         except Exception as e:
-            gen_log.warning("Invalid multipart/form-data: %s", e)
+            raise HTTPInputError("Invalid multipart/form-data: %s" % e) from e
 
 
 def parse_multipart_form_data(
@@ -916,8 +912,7 @@ def parse_multipart_form_data(
         boundary = boundary[1:-1]
     final_boundary_index = data.rfind(b"--" + boundary + b"--")
     if final_boundary_index == -1:
-        gen_log.warning("Invalid multipart/form-data: no final boundary")
-        return
+        raise HTTPInputError("Invalid multipart/form-data: no final boundary found")
     parts = data[:final_boundary_index].split(b"--" + boundary + b"\r\n")
     if len(parts) > config.max_parts:
         raise HTTPInputError("multipart/form-data has too many parts")
@@ -926,20 +921,17 @@ def parse_multipart_form_data(
             continue
         eoh = part.find(b"\r\n\r\n")
         if eoh == -1:
-            gen_log.warning("multipart/form-data missing headers")
-            continue
+            raise HTTPInputError("multipart/form-data missing headers")
         if eoh > config.max_part_header_size:
             raise HTTPInputError("multipart/form-data part header too large")
         headers = HTTPHeaders.parse(part[:eoh].decode("utf-8"))
         disp_header = headers.get("Content-Disposition", "")
         disposition, disp_params = _parse_header(disp_header)
         if disposition != "form-data" or not part.endswith(b"\r\n"):
-            gen_log.warning("Invalid multipart/form-data")
-            continue
+            raise HTTPInputError("Invalid multipart/form-data")
         value = part[eoh + 4 : -2]
         if not disp_params.get("name"):
-            gen_log.warning("multipart/form-data value missing name")
-            continue
+            raise HTTPInputError("multipart/form-data missing name")
         name = disp_params["name"]
         if disp_params.get("filename"):
             ctype = headers.get("Content-Type", "application/unknown")

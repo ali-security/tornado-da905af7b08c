@@ -657,6 +657,74 @@ class RequestEncodingTest(WebTestCase):
             self.fetch("/group/?arg=%25%e9")
 
 
+class MalformedBodyTest(WebTestCase):
+    # CVE-2025-47287: a malformed form body must be rejected with a 400
+    # (and a single log message) before the handler runs, instead of logging
+    # once per bad multipart part and executing the handler anyway.
+    def setUp(self):
+        self.prepare_called = False
+        super().setUp()
+
+    def get_handlers(self):
+        test = self
+
+        class Handler(RequestHandler):
+            def prepare(self):
+                test.prepare_called = True
+
+            def post(self):
+                self.write(dict(args=recursive_unicode(self.request.body_arguments)))
+
+        return [("/", Handler)]
+
+    def test_valid_body(self):
+        response = self.fetch("/", method="POST", body="foo=bar")
+        self.assertEqual(response.code, 200)
+        self.assertEqual(json_decode(response.body), {"args": {"foo": ["bar"]}})
+        self.assertTrue(self.prepare_called)
+
+    def test_malformed_multipart_many_parts(self):
+        # 99 parts that each used to produce their own log message.
+        body = b"--1234\r\nFoo\r\n" * 99 + b"--1234--\r\n"
+        with ExpectLog(gen_log, ".*Invalid body") as expect_log:
+            response = self.fetch(
+                "/",
+                method="POST",
+                body=body,
+                headers={"Content-Type": "multipart/form-data; boundary=1234"},
+            )
+        self.assertEqual(response.code, 400)
+        self.assertEqual(expect_log.matched, 1)
+        self.assertFalse(self.prepare_called)
+
+    def test_malformed_multipart_no_final_boundary(self):
+        with ExpectLog(gen_log, ".*Invalid body") as expect_log:
+            response = self.fetch(
+                "/",
+                method="POST",
+                body=b"--1234\r\n" * 50,
+                headers={"Content-Type": "multipart/form-data; boundary=1234"},
+            )
+        self.assertEqual(response.code, 400)
+        self.assertEqual(expect_log.matched, 1)
+        self.assertFalse(self.prepare_called)
+
+    def test_unsupported_content_encoding(self):
+        with ExpectLog(gen_log, ".*Unsupported Content-Encoding") as expect_log:
+            response = self.fetch(
+                "/",
+                method="POST",
+                body=b"foo=bar",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Content-Encoding": "gzip",
+                },
+            )
+        self.assertEqual(response.code, 400)
+        self.assertEqual(expect_log.matched, 1)
+        self.assertFalse(self.prepare_called)
+
+
 class TypeCheckHandler(RequestHandler):
     def prepare(self):
         self.errors = {}  # type: typing.Dict[str, str]

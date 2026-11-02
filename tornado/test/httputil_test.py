@@ -13,6 +13,7 @@ from tornado.httputil import (
     ParseBodyConfig,
     parse_body_arguments,
     set_parse_body_config,
+    _parse_header,
 )
 from tornado.escape import utf8, native_str
 from tornado.log import gen_log
@@ -266,6 +267,33 @@ Foo
         self.assertEqual(file["filename"], "ab.txt")
         self.assertEqual(file["body"], b"Foo")
 
+    def test_disposition_param_linear_performance(self):
+        # This is a regression test for performance of parsing parameters
+        # to the content-disposition header, specifically for semicolons within
+        # quoted strings.
+        # Use perf_counter rather than time.time, whose coarse resolution on
+        # windows can make the small run measure as zero.
+        def f(n):
+            start = time.perf_counter()
+            message = (
+                b"--1234\r\nContent-Disposition: form-data; "
+                + b'x="'
+                + b";" * n
+                + b'"; '
+                + b'name="files"; filename="a.txt"\r\n\r\nFoo\r\n--1234--\r\n'
+            )
+            args: Dict[str, List[bytes]] = {}
+            files: Dict[str, List[HTTPFile]] = {}
+            parse_multipart_form_data(b"1234", message, args, files)
+            elapsed = time.perf_counter() - start
+            self.assertEqual(files["files"][0]["filename"], "a.txt")
+            return elapsed
+
+        d1 = min(f(1_000) for _ in range(3))
+        d2 = min(f(10_000) for _ in range(3))
+        if d2 / d1 > 20:
+            self.fail(f"Disposition param parsing is not linear: {d1=} vs {d2=}")
+
     def test_multipart_config(self):
         boundary = b"1234"
         body = b"""--1234
@@ -475,6 +503,28 @@ Content-Disposition: form-data; name="files"; filename="ab.txt"
         finally:
             gen_log.removeHandler(recorder)
         self.assertEqual(records, [])
+
+
+class ParseHeaderTest(unittest.TestCase):
+    def test_quoted_semicolons_linear_performance(self):
+        # _parse_header is also used for headers that are not subject to the
+        # multipart part header size limit, such as Sec-WebSocket-Extensions,
+        # so semicolons within quoted parameter values must not make parsing
+        # take quadratic time.
+        def f(n):
+            line = 'permessage-deflate; x="' + ";" * n + '"; y=1'
+            start = time.perf_counter()
+            key, params = _parse_header(line)
+            elapsed = time.perf_counter() - start
+            self.assertEqual(key, "permessage-deflate")
+            self.assertEqual(params, {"x": ";" * n, "y": "1"})
+            return elapsed
+
+        d1 = min(f(1_000) for _ in range(3))
+        d2 = min(f(10_000) for _ in range(3))
+        if d2 / d1 > 20:
+            # d2 should be about 10x d1 but allow a wide margin for variability.
+            self.fail(f"_parse_header() does not scale linearly: {d1=} vs {d2=}")
 
 
 class HTTPHeadersTest(unittest.TestCase):

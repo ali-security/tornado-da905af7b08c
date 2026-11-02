@@ -112,3 +112,38 @@ def ignore_deprecation():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         yield
+
+
+ABT_SKIP_MESSAGE = "abstract base class"
+
+_TestCaseType = typing.TypeVar("_TestCaseType", bound=typing.Type[unittest.TestCase])
+
+
+def abstract_base_test(cls: _TestCaseType) -> _TestCaseType:
+    """Decorator to mark a test class as an "abstract" base class.
+
+    This is different from a regular abstract base class because
+    we do not limit instantiation of the class. (If we did, it would
+    interfere with test discovery). Instead, we prevent the tests from
+    being run.
+
+    Subclasses of an abstract base test are run as normal. There is
+    no support for the ``@abstractmethod`` decorator so there is no runtime
+    check that all such methods are implemented.
+
+    Note that while it is semantically cleaner to modify the test loader
+    to exclude abstract base tests, this is more complicated and would
+    interfere with third-party test runners. This approach degrades
+    gracefully to other tools such as editor-integrated testing.
+    """
+
+    # Type-checking fails due to https://github.com/python/mypy/issues/14458
+    # @functools.wraps(cls)
+    class AbstractBaseWrapper(cls):  # type: ignore
+        @classmethod
+        def setUpClass(cls):
+            if cls is AbstractBaseWrapper:
+                raise unittest.SkipTest(ABT_SKIP_MESSAGE)
+            super().setUpClass()
+
+    return AbstractBaseWrapper  # type: ignore

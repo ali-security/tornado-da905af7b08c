@@ -761,47 +761,29 @@ class MaxHeaderSizeTest(AsyncHTTPTestCase):
                 self.fetch("/large", raise_error=True)
 
 
-class MaxBodySizeTest(AsyncHTTPTestCase):
+class SimpleHTTPClientMaxBodySizeTestCase(
+    httpclient_test.HTTPClientMaxBodySizeTestCase
+):
+    refusal_log_format = "Malformed HTTP message from None: {reason}"
+
     def get_app(self):
-        class SmallBody(RequestHandler):
-            def get(self):
-                self.write("a" * 1024 * 64)
-
-        class LargeBody(RequestHandler):
-            def get(self):
-                self.write("a" * 1024 * 100)
-
         class GzipBody(RequestHandler):
             def get(self):
                 # Small on the wire, but decompresses to the given size.
                 self.set_header("Content-Encoding", "gzip")
                 self.write(gzip.compress(b"a" * int(self.get_argument("size"))))
 
-        return Application(
-            [("/small", SmallBody), ("/large", LargeBody), ("/gzip", GzipBody)]
-        )
+        app = super().get_app()
+        app.add_handlers(".*$", [("/gzip", GzipBody)])
+        return app
 
     def get_http_client(self):
-        return SimpleAsyncHTTPClient(max_body_size=1024 * 64)
-
-    def test_small_body(self):
-        response = self.fetch("/small")
-        response.rethrow()
-        self.assertEqual(response.body, b"a" * 1024 * 64)
-
-    def test_large_body(self):
-        with ExpectLog(
-            gen_log,
-            "Malformed HTTP message from None: Content-Length too long",
-            level=logging.INFO,
-        ):
-            with self.assertRaises(HTTPStreamClosedError):
-                self.fetch("/large", raise_error=True)
+        return SimpleAsyncHTTPClient(max_body_size=httpclient_test.MAX_BODY_SIZE)
 
     def test_small_gzip_body(self):
-        response = self.fetch("/gzip?size=%d" % (1024 * 64))
+        response = self.fetch("/gzip?size=%d" % httpclient_test.MAX_BODY_SIZE)
         response.rethrow()
-        self.assertEqual(response.body, b"a" * 1024 * 64)
+        self.assertEqual(response.body, b"a" * httpclient_test.MAX_BODY_SIZE)
 
     def test_large_gzip_body(self):
         # The compressed body is well under max_body_size, but the

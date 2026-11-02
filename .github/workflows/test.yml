@@ -7,7 +7,13 @@
 
 name: Test
 
-on: pull_request
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional tornado test module(s) to run instead of the full suite"
+        required: false
+        default: ""
 
 jobs:
   # Before starting the full build matrix, run one test configuration
@@ -16,6 +22,7 @@ jobs:
   test_quick:
     name: Run quick tests
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,16 +30,31 @@ jobs:
         with:
           # Lint python version must be synced with tox.ini
           python-version: '3.11'
+      - name: Install apt packages
+        run: sudo apt-get update && sudo apt-get install libcurl4-openssl-dev
       - name: Install tox
         run: python -m pip install tox -c requirements.txt
 
       - name: Run test suite
-        run: python -m tox -e py311,lint
+        env:
+          PIP_INDEX_URL: "https://:2024-06-06T18:36:10.575984Z@time-machines-pypi.sealsecurity.io/"
+        # The -full factor installs pycurl, twisted and pycares, so the
+        # curl/twisted/c-ares tests run here instead of being skipped.
+        run: python -m tox -e py311-full -- --verbose ${{ inputs.test-filter }}
+
+      # Upstream runs tox's lint env (flake8, black, mypy) here as
+      # `tox -e py311,lint`. It stays, as its own invocation: tox passes
+      # posargs to every env, so the linters would take --verbose and the
+      # test filter as file names. Its requirements are pinned, so it does
+      # not need the time-machine index.
+      - name: Run lint
+        run: python -m tox -e lint
 
   test_tox:
     name: Run full tests
     needs: test_quick
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     strategy:
       matrix:
         include:
@@ -73,7 +95,21 @@ jobs:
         run: python -m pip install tox -c requirements.txt
 
       - name: Run test suite
-        run: python -m tox -e ${{ matrix.tox_env }}
+        env:
+          # Resolve the unpinned "full" test extras (pycurl, twisted, pycares)
+          # as of the 6.4.1 release date; their 2026 releases changed APIs.
+          PIP_INDEX_URL: "https://:2024-06-06T18:36:10.575984Z@time-machines-pypi.sealsecurity.io/"
+        # pypy3 keeps upstream's single (non-"full") test pass, but gets the
+        # twisted and pycares test deps via a tox override so those tests run.
+        # pycurl is left out on pypy: pycurl 7.45.3 does not compile against
+        # PyPy's C API (Py_TRASHCAN_END undeclared).
+        run: |
+          args=()
+          if [ "${{ matrix.tox_env }}" = "pypy3" ]; then
+            args=(-x $'testenv.deps=twisted\npycares')
+            echo "pypy3: pycurl does not build on PyPy and tornado.speedups is a CPython-only C extension; their tests skip by design here and run in the CPython *-full legs."
+          fi
+          python -m tox -e ${{ matrix.tox_env }} "${args[@]}" -- --verbose ${{ inputs.test-filter }}
 
   test_win:
     # Windows tests are fairly slow, so only run one configuration here.
@@ -84,12 +120,31 @@ jobs:
     name: Run windows tests
     needs: test_quick
     runs-on: windows-2022
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         name: Install Python
         with:
           python-version: '3.11'
+      - name: Install optional test modules and build speedups
+        # twisted/pycares as of the release date, and the C speedups extension
+        # built in place, so the tests that need them run instead of being
+        # skipped. pycurl is not installed: tornado's curl client does not work
+        # on Windows (curl_httpclient_test hello_world/response_times/
+        # digest_auth_non_ascii fail there), and upstream never tests it there.
+        env:
+          PIP_INDEX_URL: "https://:2024-06-06T18:36:10.575984Z@time-machines-pypi.sealsecurity.io/"
+        run: |
+          py -3.11 -m pip install twisted pycares setuptools
+          py -3.11 setup.py build_ext --inplace
       - name: Run test suite
         # TODO: figure out what's up with these log messages
-        run: py -m tornado.test --fail-if-logs=false
+        run: |
+          py -3.11 -m tornado.test --fail-if-logs=false --verbose ${{ inputs.test-filter }}
+          $rc = $LASTEXITCODE
+          Write-Host "tornado.test exit code: $rc (non-zero on any test failure or error)."
+          Write-Host "--fail-if-logs=false is upstream's own Windows setting (see the TODO above): on Windows the asyncio SelectorThread"
+          Write-Host "teardown can log 'Task was destroyed but it is pending' / 'coroutine thread_manager_anext was never awaited'"
+          Write-Host "to stderr after a test has already passed. Those are logged, not test failures; unittest's result above is authoritative."
+          exit $rc

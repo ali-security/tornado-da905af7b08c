@@ -100,6 +100,10 @@ class AutoreloadTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0)
         return out
 
+    @unittest.skipIf(
+        sys.implementation.name == "pypy",
+        "pypy 3.8 (v7.3.11) subprocess dies in enum._convert_ importing ssl",
+    )
     def test_reload(self):
         main = """\
 import sys

@@ -842,3 +842,37 @@ class ChunkedWithContentLengthTest(AsyncHTTPTestCase):
         ):
             with self.assertRaises(HTTPStreamClosedError):
                 self.fetch("/chunkwithcl", raise_error=True)
+
+
+class LineFoldingTest(AsyncHTTPTestCase):
+    def respond_folded(self, request):
+        # A response using obsolete line folding: the second line of the
+        # X-XSS-Protection header starts with a tab.
+        stream = request.connection.detach()
+        stream.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"X-XSS-Protection: 1;\r\n"
+            b"\tmode=block\r\n"
+            b"Content-Length: 2\r\n"
+            b"\r\n"
+            b"ok"
+        )
+        stream.close()
+
+    def get_app(self):
+        return self.respond_folded
+
+    def get_http_client(self):
+        return SimpleAsyncHTTPClient()
+
+    def test_folded_response_header_rejected(self):
+        # simple_httpclient rejects folded response headers instead of
+        # unfolding them, and the error reaches the caller right away
+        # instead of the request hanging until it times out.
+        with ExpectLog(
+            gen_log,
+            "Malformed HTTP message from None: .*folding not supported",
+            level=logging.INFO,
+        ):
+            with self.assertRaises(HTTPStreamClosedError):
+                self.fetch("/", raise_error=True)

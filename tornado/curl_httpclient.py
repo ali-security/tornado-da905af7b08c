@@ -35,7 +35,7 @@ from tornado.httpclient import (
     AsyncHTTPClient,
     main,
 )
-from tornado.log import app_log
+from tornado.log import app_log, gen_log
 
 from typing import Dict, Any, Callable, Optional
 import typing
@@ -708,7 +708,7 @@ class CurlAsyncHTTPClient(AsyncHTTPClient):
         headers: httputil.HTTPHeaders,
         header_callback: Callable[[str], None],
         header_line_bytes: bytes,
-    ) -> None:
+    ) -> Optional[int]:
         header_line = native_str(header_line_bytes.decode("latin1"))
         if header_callback is not None:
             self.io_loop.add_callback(header_callback, header_line)
@@ -721,10 +721,21 @@ class CurlAsyncHTTPClient(AsyncHTTPClient):
                 (__, __, reason) = httputil.parse_response_start_line(header_line)
                 header_line = "X-Http-Reason: %s" % reason
             except httputil.HTTPInputError:
-                return
+                return None
         if not header_line:
-            return
-        headers.parse_line(header_line)
+            return None
+        try:
+            headers.parse_line(header_line)
+        except httputil.HTTPInputError as e:
+            # Malformed header line. Notably, older versions of libcurl pass
+            # the continuation lines of an obsolete folded header through
+            # as-is, and line folding is no longer supported. Writing less
+            # than we were given makes libcurl fail the transfer with
+            # CURLE_WRITE_ERROR (instead of the exception escaping into
+            # pycurl, which just prints it).
+            gen_log.info("Malformed HTTP message: %s", e)
+            return 0
+        return None
 
     def _curl_debug(self, debug_type: int, debug_msg: str) -> None:
         debug_types = ("I", "<", ">", "<", ">")

@@ -149,7 +149,6 @@ class HTTPHeaders(collections.abc.MutableMapping):
         # on demand (and cleared whenever the list is modified).
         self._as_list = {}  # type: typing.Dict[str, typing.List[str]]
         self._combined_cache = {}  # type: typing.Dict[str, str]
-        self._last_key = None  # type: Optional[str]
         if len(args) == 1 and len(kwargs) == 0 and isinstance(args[0], HTTPHeaders):
             # Copy constructor
             for k, v in args[0].get_all():
@@ -163,7 +162,6 @@ class HTTPHeaders(collections.abc.MutableMapping):
     def add(self, name: str, value: str) -> None:
         """Adds a new value for the given key."""
         norm_name = _normalize_header(name)
-        self._last_key = norm_name
         if norm_name in self:
             self._combined_cache.pop(norm_name, None)
             self._as_list[norm_name].append(value)
@@ -192,20 +190,21 @@ class HTTPHeaders(collections.abc.MutableMapping):
         >>> h.parse_line("Content-Type: text/html")
         >>> h.get('content-type')
         'text/html'
+
+        .. versionchanged:: 6.6
+           Support for line folding (obsolete continuation lines beginning
+           with whitespace) was removed due to security/DoS concerns. Such
+           lines now raise `HTTPInputError`.
         """
         if line[0].isspace():
-            # continuation of a multi-line header
-            if self._last_key is None:
-                raise HTTPInputError("first header line cannot start with whitespace")
-            new_part = " " + line.lstrip(HTTP_WHITESPACE)
-            self._as_list[self._last_key][-1] += new_part
-            self._combined_cache.pop(self._last_key, None)
-        else:
-            try:
-                name, value = line.split(":", 1)
-            except ValueError:
-                raise HTTPInputError("no colon in header line")
-            self.add(name, value.strip(HTTP_WHITESPACE))
+            raise HTTPInputError(
+                "header line cannot start with whitespace, folding not supported"
+            )
+        try:
+            name, value = line.split(":", 1)
+        except ValueError:
+            raise HTTPInputError("no colon in header line")
+        self.add(name, value.strip(HTTP_WHITESPACE))
 
     @classmethod
     def parse(cls, headers: str) -> "HTTPHeaders":
